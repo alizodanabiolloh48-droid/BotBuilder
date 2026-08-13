@@ -1,447 +1,721 @@
-import os
 import asyncio
 import logging
+import os
+import re
+from contextlib import suppress
 
-from aiogram import Bot, Dispatcher, F
+from dotenv import load_dotenv
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+
+from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import CommandStart
-from aiogram.types import Message, CallbackQuery
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    Update
+)
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import StatesGroup, State
 
-from database import init_db, save_user
-from bot_manager import check_bot_token, run_user_bot
-
-logging.basicConfig(level=logging.INFO)
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN ёфт нашуд!")
-
-dp = Dispatcher()
-
-# Маълумоти муваққатии корбарон
-users = {}
-
-# Ботҳои шахсии фаъол
-running_bots = {}
+import database
 
 
-# ==========================================
-# МЕНЮ
-# ==========================================
+# =========================================================
+# CONFIG
+# =========================================================
 
-def main_menu():
-    keyboard = InlineKeyboardBuilder()
+load_dotenv()
 
-    keyboard.button(
-        text="📁 Ҷустуҷӯи файлҳо",
-        callback_data="files"
-    )
-    keyboard.button(
-        text="🖼 Акс ва дизайн",
-        callback_data="media"
-    )
-    keyboard.button(
-        text="🛒 Савдо",
-        callback_data="shop"
-    )
-    keyboard.button(
-        text="🎬 Видео",
-        callback_data="video"
-    )
-    keyboard.button(
-        text="📚 Китоб / омӯзиш",
-        callback_data="education"
-    )
-    keyboard.button(
-        text="📢 Канал",
-        callback_data="channel"
-    )
-    keyboard.button(
-        text="⚙️ Боти дигар",
-        callback_data="custom"
+BOT_BUILDER_TOKEN = os.getenv("BOT_BUILDER_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+PORT = int(os.getenv("PORT", "10000"))
+
+if not BOT_BUILDER_TOKEN:
+    raise RuntimeError(
+        "BOT_BUILDER_TOKEN ёфт нашуд!"
     )
 
-    keyboard.adjust(2)
+if not WEBHOOK_URL:
+    raise RuntimeError(
+        "WEBHOOK_URL ёфт нашуд!"
+    )
 
-    return keyboard.as_markup()
+
+logging.basicConfig(
+    level=logging.INFO
+)
+
+logger = logging.getLogger("bot-builder")
 
 
-# ==========================================
+database.init_db()
+
+
+# =========================================================
+# MAIN BOT
+# =========================================================
+
+main_bot = Bot(BOT_BUILDER_TOKEN)
+main_dp = Dispatcher()
+
+app = FastAPI(
+    title="Telegram Bot Builder"
+)
+
+
+# =========================================================
+# STATES
+# =========================================================
+
+class CreateBot(StatesGroup):
+    category = State()
+    token = State()
+    channel = State()
+    channel_url = State()
+
+
+class SearchFile(StatesGroup):
+    query = State()
+
+
+# =========================================================
+# KEYBOARDS
+# =========================================================
+
+def category_keyboard():
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🖼 Аксҳо",
+                    callback_data="category:photos"
+                ),
+                InlineKeyboardButton(
+                    text="🎬 Видео",
+                    callback_data="category:videos"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📁 Файлҳо",
+                    callback_data="category:files"
+                ),
+                InlineKeyboardButton(
+                    text="🔎 Ҷустуҷӯ",
+                    callback_data="category:search"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🛍 Савдо",
+                    callback_data="category:shop"
+                ),
+                InlineKeyboardButton(
+                    text="📢 Канал",
+                    callback_data="category:channel"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="➕ Дигар",
+                    callback_data="category:other"
+                )
+            ]
+        ]
+    )
+
+
+# =========================================================
 # START
-# ==========================================
+# =========================================================
 
-@dp.message(CommandStart())
-async def start(message: Message):
+@main_dp.message(CommandStart())
+async def start_handler(
+    message: Message,
+    state: FSMContext
+):
 
-    user_id = message.from_user.id
+    await state.clear()
 
-    users[user_id] = {
-        "step": "type",
-        "type": None,
-        "token": None,
-        "bot_username": None,
-        "channel": None,
-        "url": None
-    }
+    database.add_user(
+        message.from_user.id
+    )
 
     await message.answer(
-        "🤖 <b>BOT BUILDER</b>\n\n"
-        "Боти худро автоматӣ созед.\n\n"
-        "Боти шумо барои кадом кор сохта мешавад?",
-        reply_markup=main_menu(),
-        parse_mode="HTML"
+        "👋 Салом!\n\n"
+        "🤖 Ман Bot Builder ҳастам.\n\n"
+        "Боти худро барои кадом кор месозед?",
+        reply_markup=category_keyboard()
     )
 
 
-# ==========================================
-# ИНТИХОБИ НАМУДИ БОТ
-# ==========================================
+# =========================================================
+# CATEGORY
+# =========================================================
 
-@dp.callback_query(
-    F.data.in_({
-        "files",
-        "media",
-        "shop",
-        "video",
-        "education",
-        "channel",
-        "custom"
-    })
+@main_dp.callback_query(
+    F.data.startswith("category:")
 )
-async def select_type(callback: CallbackQuery):
+async def category_handler(
+    callback: CallbackQuery,
+    state: FSMContext
+):
 
-    user_id = callback.from_user.id
+    category = callback.data.split(":", 1)[1]
 
-    names = {
-        "files": "📁 Ҷустуҷӯи файлҳо",
-        "media": "🖼 Акс ва дизайн",
-        "shop": "🛒 Савдо",
-        "video": "🎬 Видео",
-        "education": "📚 Китоб / омӯзиш",
-        "channel": "📢 Канал",
-        "custom": "⚙️ Боти дигар"
-    }
+    await state.update_data(
+        category=category
+    )
 
-    if user_id not in users:
-        users[user_id] = {}
+    await state.set_state(
+        CreateBot.token
+    )
 
-    users[user_id]["type"] = callback.data
-    users[user_id]["step"] = "token"
-
-    await callback.message.answer(
-        f"✅ <b>{names[callback.data]}</b>\n\n"
-        "🔑 Токени боти худро фиристед.\n\n"
-        "⚠️ Token-ро ба каси дигар нафиристед.",
-        parse_mode="HTML"
+    await callback.message.edit_text(
+        "🔑 Bot Token-ро фиристед.\n\n"
+        "Token бояд аз @BotFather гирифта шуда бошад."
     )
 
     await callback.answer()
 
 
-# ==========================================
-# TOKEN / CHANNEL / URL
-# ==========================================
+# =========================================================
+# TOKEN
+# =========================================================
 
-@dp.message()
-async def process_message(message: Message):
+@main_dp.message(CreateBot.token)
+async def token_handler(
+    message: Message,
+    state: FSMContext
+):
 
-    user_id = message.from_user.id
+    token = message.text.strip()
 
-    if user_id not in users:
+    if not re.match(
+        r"^\d{6,15}:[A-Za-z0-9_-]{20,}$",
+        token
+    ):
         await message.answer(
-            "Аввал /start-ро пахш кунед."
+            "❌ Token нодуруст аст."
         )
         return
 
-    if not message.text:
-        await message.answer(
-            "❌ Лутфан маълумотро ҳамчун матн фиристед."
-        )
-        return
-
-    data = users[user_id]
-    step = data.get("step")
-    text = message.text.strip()
-
-    # ======================================
-    # TOKEN
-    # ======================================
-
-    if step == "token":
-
-        await message.answer(
-            "🔄 Token санҷида мешавад..."
-        )
-
-        result = await check_bot_token(text)
-
-        if not result:
-            await message.answer(
-                "❌ <b>Token нодуруст аст.</b>\n\n"
-                "Token-ро санҷед ва дубора фиристед.",
-                parse_mode="HTML"
-            )
-            return
-
-        # Нагузорем, ки token-и боти асосӣ истифода шавад
-        if result["id"] == message.bot.id:
-
-            await result["bot"].session.close()
-
-            await message.answer(
-                "❌ Боти асосии BotBuilder-ро истифода бурда наметавонед.\n\n"
-                "Аз @BotFather боти дигар созед."
-            )
-            return
-
-        data["token"] = text
-        data["bot_username"] = result["username"]
-        data["step"] = "channel"
-
-        await result["bot"].session.close()
-
-        await message.answer(
-            "✅ <b>Token дуруст аст!</b>\n\n"
-            f"🤖 Бот: @{result['username']}\n"
-            f"👤 Ном: {result['name']}\n\n"
-            "📢 Акнун @username-и канали худро фиристед.\n\n"
-            "Мисол:\n"
-            "<code>@mychannel</code>",
-            parse_mode="HTML"
-        )
-
-        return
-
-    # ======================================
-    # CHANNEL
-    # ======================================
-
-    if step == "channel":
-
-        if not text.startswith("@"):
-
-            await message.answer(
-                "❌ Формати канал нодуруст аст.\n\n"
-                "Мисол:\n"
-                "<code>@mychannel</code>",
-                parse_mode="HTML"
-            )
-            return
-
-        data["channel"] = text
-        data["step"] = "url"
-
-        await message.answer(
-            "✅ Канал қабул шуд.\n\n"
-            "🔗 URL-и каналро фиристед.\n\n"
-            "Мисол:\n"
-            "<code>https://t.me/mychannel</code>",
-            parse_mode="HTML"
-        )
-
-        return
-
-    # ======================================
-    # URL
-    # ======================================
-
-    if step == "url":
-
-        if not (
-            text.startswith("https://t.me/")
-            or text.startswith("http://t.me/")
-        ):
-
-            await message.answer(
-                "❌ URL нодуруст аст.\n\n"
-                "Мисол:\n"
-                "<code>https://t.me/mychannel</code>",
-                parse_mode="HTML"
-            )
-            return
-
-        data["url"] = text
-        data["step"] = "ready"
-
-        # Сабти конфигурация
-        save_user(
-            user_id=user_id,
-            bot_type=data["type"],
-            bot_token=data["token"],
-            bot_username=data["bot_username"],
-            channel=data["channel"],
-            channel_url=data["url"],
-            status="ready"
-        )
-
-        keyboard = InlineKeyboardBuilder()
-
-        keyboard.button(
-            text="🚀 Ба кор даровардани бот",
-            callback_data="launch_bot"
-        )
-
-        keyboard.button(
-            text="🔄 Аз нав оғоз кардан",
-            callback_data="restart_setup"
-        )
-
-        keyboard.adjust(1)
-
-        await message.answer(
-            "🎉 <b>Ҳамаи маълумот қабул шуд!</b>\n\n"
-            f"🤖 Бот: @{data['bot_username']}\n"
-            f"📢 Канал: {data['channel']}\n"
-            f"🔗 URL: {data['url']}\n\n"
-            "Барои оғоз кардани боти шахсӣ тугмаи поёнро пахш кунед.",
-            reply_markup=keyboard.as_markup(),
-            parse_mode="HTML"
-        )
-
-        return
-
-
-# ==========================================
-# LAUNCH USER BOT
-# ==========================================
-
-@dp.callback_query(F.data == "launch_bot")
-async def launch_bot(callback: CallbackQuery):
-
-    user_id = callback.from_user.id
-
-    if user_id not in users:
-
-        await callback.answer(
-            "Маълумот ёфт нашуд.",
-            show_alert=True
-        )
-        return
-
-    data = users[user_id]
-
-    if data.get("step") != "ready":
-
-        await callback.answer(
-            "Аввал ҳамаи маълумотро пур кунед.",
-            show_alert=True
-        )
-        return
-
-    # Агар аллакай фаъол бошад
-    if user_id in running_bots:
-
-        task = running_bots[user_id]
-
-        if not task.done():
-
-            await callback.message.answer(
-                f"🟢 Боти @{data['bot_username']} аллакай фаъол аст."
-            )
-
-            await callback.answer()
-            return
-
-    await callback.message.answer(
-        "🚀 <b>Бот ба кор дароварда мешавад...</b>\n\n"
-        f"🤖 @{data['bot_username']}\n"
-        "⚙️ Омода кардани функсияҳо...",
-        parse_mode="HTML"
-    )
+    test_bot = Bot(token)
 
     try:
 
-        # Боти шахсӣ дар background оғоз мешавад
-        task = asyncio.create_task(
-            run_user_bot(
-                data["token"],
-                data["type"]
-            )
+        info = await test_bot.get_me()
+
+    except Exception:
+
+        await message.answer(
+            "❌ Token кор намекунад."
         )
 
-        running_bots[user_id] = task
-
-        save_user(
-            user_id=user_id,
-            bot_type=data["type"],
-            bot_token=data["token"],
-            bot_username=data["bot_username"],
-            channel=data["channel"],
-            channel_url=data["url"],
-            status="active"
-        )
-
-        data["step"] = "active"
-
-        await asyncio.sleep(1)
-
-        await callback.message.answer(
-            "🟢 <b>Боти шумо фаъол шуд!</b>\n\n"
-            f"🤖 @{data['bot_username']}\n"
-            f"📢 {data['channel']}\n\n"
-            "Ҳоло метавонед ба боти худ дар Telegram дароед ва "
-            "/start фиристед.",
-            parse_mode="HTML"
-        )
-
-    except Exception as e:
-
-        logging.error(
-            "Launch error: %s",
-            e
-        )
-
-        await callback.message.answer(
-            "❌ Ҳангоми ба кор даровардани бот хато шуд."
-        )
-
-    await callback.answer()
-
-
-# ==========================================
-# RESTART SETUP
-# ==========================================
-
-@dp.callback_query(F.data == "restart_setup")
-async def restart_setup(callback: CallbackQuery):
-
-    user_id = callback.from_user.id
-
-    users[user_id] = {
-        "step": "type",
-        "type": None,
-        "token": None,
-        "bot_username": None,
-        "channel": None,
-        "url": None
-    }
-
-    await callback.message.answer(
-        "🔄 Боз оғоз мекунем.\n\n"
-        "Боти шумо барои кадом кор сохта мешавад?",
-        reply_markup=main_menu()
-    )
-
-    await callback.answer()
-
-
-# ==========================================
-# MAIN
-# ==========================================
-
-async def main():
-
-    init_db()
-
-    bot = Bot(BOT_TOKEN)
-
-    try:
-        await dp.start_polling(bot)
+        return
 
     finally:
-        await bot.session.close()
+
+        with suppress(Exception):
+            await test_bot.session.close()
+
+    await state.update_data(
+        token=token,
+        bot_id=info.id,
+        bot_username=info.username or "",
+        bot_name=info.first_name or ""
+    )
+
+    await state.set_state(
+        CreateBot.channel
+    )
+
+    await message.answer(
+        f"✅ Token дуруст аст.\n\n"
+        f"🤖 @{info.username}\n\n"
+        "📢 @username-и канали худро фиристед."
+    )
 
 
-if __name__ == "__main__":
-    asyncio.run(main())
+# =========================================================
+# CHANNEL
+# =========================================================
+
+@main_dp.message(CreateBot.channel)
+async def channel_handler(
+    message: Message,
+    state: FSMContext
+):
+
+    channel = message.text.strip()
+
+    if not re.match(
+        r"^@[A-Za-z0-9_]{5,}$",
+        channel
+    ):
+        await message.answer(
+            "❌ Масалан: @my_channel"
+        )
+        return
+
+    data = await state.get_data()
+
+    test_bot = Bot(
+        data["token"]
+    )
+
+    try:
+
+        chat = await test_bot.get_chat(
+            channel
+        )
+
+        if chat.type != "channel":
+            await message.answer(
+                "❌ Ин Channel нест."
+            )
+            return
+
+        member = await test_bot.get_chat_member(
+            chat.id,
+            data["bot_id"]
+        )
+
+        if member.status not in (
+            "administrator",
+            "creator"
+        ):
+            await message.answer(
+                "❌ Аввал ботро ба канал "
+                "ҳамчун Administrator илова кунед."
+            )
+            return
+
+    except Exception:
+
+        await message.answer(
+            "❌ Канал ёфт нашуд."
+        )
+
+        return
+
+    finally:
+
+        with suppress(Exception):
+            await test_bot.session.close()
+
+    await state.update_data(
+        channel=channel
+    )
+
+    await state.set_state(
+        CreateBot.channel_url
+    )
+
+    await message.answer(
+        "🔗 URL-и каналро фиристед.\n\n"
+        "Мисол:\n"
+        "https://t.me/my_channel"
+    )
+
+
+# =========================================================
+# CHANNEL URL
+# =========================================================
+
+@main_dp.message(CreateBot.channel_url)
+async def channel_url_handler(
+    message: Message,
+    state: FSMContext
+):
+
+    url = message.text.strip()
+
+    if not re.match(
+        r"^https://t\.me/[A-Za-z0-9_+/-]+$",
+        url
+    ):
+        await message.answer(
+            "❌ URL нодуруст аст."
+        )
+        return
+
+    data = await state.get_data()
+
+    database.save_bot(
+        owner_id=message.from_user.id,
+        bot_id=data["bot_id"],
+        bot_username=data["bot_username"],
+        bot_name=data["bot_name"],
+        token=data["token"],
+        category=data["category"],
+        channel_username=data["channel"],
+        channel_url=url
+    )
+
+    await state.clear()
+
+    await message.answer(
+        "🎉 Боти шумо сохта шуд!\n\n"
+        f"🤖 @{data['bot_username']}\n"
+        f"📢 {data['channel']}\n\n"
+        "Ҳоло webhook-и бот насб мешавад."
+    )
+
+    await setup_child_bot(
+        data["bot_id"]
+    )
+
+
+# =========================================================
+# CHILD BOT ROUTER
+# =========================================================
+
+def create_child_router(bot_id):
+
+    router = Router()
+
+    @router.message(CommandStart())
+    async def child_start(
+        message: Message
+    ):
+
+        await message.answer(
+            "👋 Салом!\n\n"
+            "🔎 Номи файлро нависед.\n"
+            "Ман аз база ҷустуҷӯ мекунам."
+        )
+
+
+    @router.message(F.document)
+    async def document_handler(
+        message: Message
+    ):
+
+        document = message.document
+
+        name = (
+            document.file_name
+            or f"file_{message.message_id}"
+        )
+
+        database.add_file(
+            bot_id=bot_id,
+            file_name=name,
+            file_id=document.file_id,
+            file_type="document",
+            message_id=message.message_id
+        )
+
+        await message.answer(
+            f"✅ Файл нигоҳ дошта шуд:\n{name}"
+        )
+
+
+    @router.message(F.photo)
+    async def photo_handler(
+        message: Message
+    ):
+
+        photo = message.photo[-1]
+
+        name = (
+            message.caption
+            or f"photo_{message.message_id}.jpg"
+        )
+
+        database.add_file(
+            bot_id=bot_id,
+            file_name=name,
+            file_id=photo.file_id,
+            file_type="photo",
+            message_id=message.message_id
+        )
+
+        await message.answer(
+            "🖼 Акс нигоҳ дошта шуд."
+        )
+
+
+    @router.message(F.video)
+    async def video_handler(
+        message: Message
+    ):
+
+        video = message.video
+
+        name = (
+            video.file_name
+            or message.caption
+            or f"video_{message.message_id}.mp4"
+        )
+
+        database.add_file(
+            bot_id=bot_id,
+            file_name=name,
+            file_id=video.file_id,
+            file_type="video",
+            message_id=message.message_id
+        )
+
+        await message.answer(
+            "🎬 Видео нигоҳ дошта шуд."
+        )
+
+
+    @router.message(F.text)
+    async def search_handler(
+        message: Message
+    ):
+
+        query = message.text.strip()
+
+        if not query:
+            return
+
+        results = database.search_files(
+            bot_id,
+            query
+        )
+
+        if not results:
+
+            await message.answer(
+                f"❌ Барои «{query}» чизе ёфт нашуд."
+            )
+
+            return
+
+        await message.answer(
+            f"🔎 Натиҷаҳо: {len(results)}"
+        )
+
+        for item in results:
+
+            try:
+
+                if item["file_type"] == "photo":
+
+                    await message.answer_photo(
+                        item["file_id"],
+                        caption=item["file_name"]
+                    )
+
+                elif item["file_type"] == "video":
+
+                    await message.answer_video(
+                        item["file_id"],
+                        caption=item["file_name"]
+                    )
+
+                else:
+
+                    await message.answer_document(
+                        item["file_id"],
+                        caption=item["file_name"]
+                    )
+
+            except Exception as e:
+
+                logger.error(
+                    "Send file error: %s",
+                    e
+                )
+
+
+    return router
+
+
+# =========================================================
+# CHILD BOT WEBHOOK
+# =========================================================
+
+child_dispatchers = {}
+child_bots = {}
+
+
+async def setup_child_bot(bot_id):
+
+    item = database.get_bot(
+        bot_id
+    )
+
+    if not item:
+        return
+
+    token = database.decrypt_token(
+        item["token_encrypted"]
+    )
+
+    bot = Bot(token)
+
+    dp = Dispatcher()
+
+    dp.include_router(
+        create_child_router(bot_id)
+    )
+
+    child_bots[bot_id] = bot
+    child_dispatchers[bot_id] = dp
+
+    webhook = (
+        f"{WEBHOOK_URL.rstrip('/')}"
+        f"/telegram/{bot_id}"
+    )
+
+    await bot.set_webhook(
+        webhook,
+        drop_pending_updates=True
+    )
+
+    logger.info(
+        "Webhook enabled: %s",
+        webhook
+    )
+
+
+# =========================================================
+# MAIN WEBHOOK
+# =========================================================
+
+@app.post("/telegram/main")
+async def main_webhook(
+    request: Request
+):
+
+    data = await request.json()
+
+    update = Update.model_validate(
+        data
+    )
+
+    await main_dp.feed_update(
+        main_bot,
+        update
+    )
+
+    return JSONResponse(
+        {"ok": True}
+    )
+
+
+# =========================================================
+# CHILD WEBHOOK
+# =========================================================
+
+@app.post("/telegram/{bot_id}")
+async def child_webhook(
+    bot_id: int,
+    request: Request
+):
+
+    dp = child_dispatchers.get(
+        bot_id
+    )
+
+    bot = child_bots.get(
+        bot_id
+    )
+
+    if not dp or not bot:
+
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "bot_not_loaded"
+            },
+            status_code=404
+        )
+
+    data = await request.json()
+
+    update = Update.model_validate(
+        data
+    )
+
+    await dp.feed_update(
+        bot,
+        update
+    )
+
+    return JSONResponse(
+        {"ok": True}
+    )
+
+
+# =========================================================
+# HEALTH CHECK
+# =========================================================
+
+@app.get("/")
+async def home():
+
+    return {
+        "status": "online",
+        "service": "Telegram Bot Builder"
+    }
+
+
+@app.get("/health")
+async def health():
+
+    return {
+        "status": "ok"
+    }
+
+
+# =========================================================
+# STARTUP
+# =========================================================
+
+@app.on_event("startup")
+async def startup():
+
+    await main_bot.set_webhook(
+        f"{WEBHOOK_URL.rstrip('/')}/telegram/main",
+        drop_pending_updates=True
+    )
+
+    active = database.get_active_bots()
+
+    for item in active:
+
+        try:
+
+            await setup_child_bot(
+                item["bot_id"]
+            )
+
+        except Exception as e:
+
+            logger.exception(
+                "Failed to start bot %s: %s",
+                item["bot_id"],
+                e
+            )
+
+
+# =========================================================
+# SHUTDOWN
+# =========================================================
+
+@app.on_event("shutdown")
+async def shutdown():
+
+    with suppress(Exception):
+        await main_bot.delete_webhook()
+
+    for bot in child_bots.values():
+
+        with suppress(Exception):
+            await bot.delete_webhook()
+
+        with suppress(Exception):
+            await bot.session.close()
+
+    with suppress(Exception):
+        await main_bot.session.close()
