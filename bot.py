@@ -6,7 +6,9 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.exceptions import TelegramUnauthorizedError
+
+from database import init_db, save_user
+from bot_manager import check_bot_token
 
 logging.basicConfig(level=logging.INFO)
 
@@ -17,51 +19,99 @@ if not BOT_TOKEN:
 
 dp = Dispatcher()
 
-# Ҳолати муваққатии корбарон
+# Ҳолати муваққатии корбар
 users = {}
 
+
+# ==========================================
+# МЕНЮ
+# ==========================================
 
 def main_menu():
     keyboard = InlineKeyboardBuilder()
 
-    keyboard.button(text="📁 Файлҳо", callback_data="files")
-    keyboard.button(text="🖼 Акс / дизайн", callback_data="media")
-    keyboard.button(text="🛒 Савдо", callback_data="shop")
-    keyboard.button(text="🎬 Видео", callback_data="video")
-    keyboard.button(text="📚 Китоб", callback_data="education")
-    keyboard.button(text="📢 Канал", callback_data="channel")
+    keyboard.button(
+        text="📁 Ҷустуҷӯи файлҳо",
+        callback_data="files"
+    )
+
+    keyboard.button(
+        text="🖼 Акс ва дизайн",
+        callback_data="media"
+    )
+
+    keyboard.button(
+        text="🛒 Савдо",
+        callback_data="shop"
+    )
+
+    keyboard.button(
+        text="🎬 Видео",
+        callback_data="video"
+    )
+
+    keyboard.button(
+        text="📚 Китоб / омӯзиш",
+        callback_data="education"
+    )
+
+    keyboard.button(
+        text="📢 Канал",
+        callback_data="channel"
+    )
+
+    keyboard.button(
+        text="⚙️ Боти дигар",
+        callback_data="custom"
+    )
 
     keyboard.adjust(2)
+
     return keyboard.as_markup()
 
 
+# ==========================================
+# START
+# ==========================================
+
 @dp.message(CommandStart())
 async def start(message: Message):
-    users[message.from_user.id] = {
+
+    user_id = message.from_user.id
+
+    users[user_id] = {
         "step": "type",
         "type": None,
         "token": None,
+        "bot_username": None,
         "channel": None,
-        "url": None,
+        "url": None
     }
 
     await message.answer(
-        "🤖 <b>Bot Builder</b>\n\n"
-        "Боти шумо барои кадом кор сохта мешавад?\n\n"
-        "Яке аз вариантҳоро интихоб кунед:",
+        "🤖 <b>BOT BUILDER</b>\n\n"
+        "Боти худро ба осонӣ созед.\n\n"
+        "Боти шумо барои кадом кор сохта мешавад?",
         reply_markup=main_menu(),
         parse_mode="HTML"
     )
 
 
-@dp.callback_query(F.data.in_({
-    "files",
-    "media",
-    "shop",
-    "video",
-    "education",
-    "channel"
-}))
+# ==========================================
+# ИНТИХОБИ НАМУДИ БОТ
+# ==========================================
+
+@dp.callback_query(
+    F.data.in_({
+        "files",
+        "media",
+        "shop",
+        "video",
+        "education",
+        "channel",
+        "custom"
+    })
+)
 async def select_type(callback: CallbackQuery):
 
     user_id = callback.from_user.id
@@ -76,20 +126,25 @@ async def select_type(callback: CallbackQuery):
         "video": "🎬 Видео",
         "education": "📚 Китоб / омӯзиш",
         "channel": "📢 Канал",
+        "custom": "⚙️ Боти дигар"
     }
 
     users[user_id]["type"] = callback.data
     users[user_id]["step"] = "token"
 
     await callback.message.answer(
-        f"✅ Интихоб шуд: <b>{names[callback.data]}</b>\n\n"
-        "🔑 Ҳоло токени боти худро фиристед.\n\n"
-        "⚠️ Token танҳо дар дохили система коркард мешавад.",
+        f"✅ <b>{names[callback.data]}</b>\n\n"
+        "🔑 Токени боти худро фиристед.\n\n"
+        "Token аз @BotFather гирифта мешавад.",
         parse_mode="HTML"
     )
 
     await callback.answer()
 
+
+# ==========================================
+# ҚАБУЛИ TOKEN / CHANNEL / URL
+# ==========================================
 
 @dp.message()
 async def process_message(message: Message):
@@ -105,123 +160,258 @@ async def process_message(message: Message):
     data = users[user_id]
     step = data.get("step")
 
-    # ==========================
+    if not message.text:
+        await message.answer(
+            "❌ Лутфан маълумотро ҳамчун матн фиристед."
+        )
+        return
+
+    text = message.text.strip()
+
+    # ======================================
     # TOKEN
-    # ==========================
+    # ======================================
 
     if step == "token":
-
-        token = message.text.strip()
 
         await message.answer(
             "🔄 Token санҷида мешавад..."
         )
 
-        try:
-            test_bot = Bot(token)
+        result = await check_bot_token(text)
 
-            me = await test_bot.get_me()
-
-            await test_bot.session.close()
-
-            data["token"] = token
-            data["step"] = "channel"
+        if not result:
 
             await message.answer(
-                "✅ <b>Token дуруст аст!</b>\n\n"
-                f"🤖 Номи бот: <b>{me.full_name}</b>\n"
-                f"🔹 Username: @{me.username}\n\n"
-                "📢 Акнун @username-и канали худро фиристед.",
+                "❌ <b>Token нодуруст аст.</b>\n\n"
+                "Token-ро аз @BotFather санҷед ва дубора фиристед.",
                 parse_mode="HTML"
             )
 
-        except TelegramUnauthorizedError:
-
-            await message.answer(
-                "❌ Token нодуруст аст.\n\n"
-                "Token-ро аз BotFather санҷед ва дубора фиристед."
-            )
-
-        except Exception as e:
-
-            logging.error("Token error: %s", e)
-
-            await message.answer(
-                "❌ Token санҷида нашуд.\n"
-                "Дубора кӯшиш кунед."
-            )
-
-        return
-
-    # ==========================
-    # CHANNEL
-    # ==========================
-
-    if step == "channel":
-
-        channel = message.text.strip()
-
-        if not channel.startswith("@"):
-            await message.answer(
-                "❌ Формат нодуруст аст.\n\n"
-                "Мисол:\n"
-                "@mychannel"
-            )
             return
 
-        data["channel"] = channel
-        data["step"] = "url"
+        data["token"] = text
+        data["bot_username"] = result["username"]
+        data["step"] = "channel"
+
+        # connection-ро мепӯшем
+        await result["bot"].session.close()
 
         await message.answer(
-            "✅ Канал қабул шуд.\n\n"
-            "🔗 Акнун силкаи канали худро фиристед.\n\n"
+            "✅ <b>Token дуруст аст!</b>\n\n"
+            f"🤖 Бот: @{result['username']}\n"
+            f"👤 Ном: {result['name']}\n\n"
+            "📢 Акнун @username-и канали худро фиристед.\n\n"
             "Мисол:\n"
-            "https://t.me/mychannel"
-        )
-
-        return
-
-    # ==========================
-    # URL
-    # ==========================
-
-    if step == "url":
-
-        url = message.text.strip()
-
-        if not (
-            url.startswith("https://t.me/")
-            or url.startswith("http://t.me/")
-        ):
-            await message.answer(
-                "❌ URL нодуруст аст.\n\n"
-                "Мисол:\n"
-                "https://t.me/mychannel"
-            )
-            return
-
-        data["url"] = url
-        data["step"] = "ready"
-
-        await message.answer(
-            "🎉 <b>Ҳамаи маълумот қабул шуд!</b>\n\n"
-            f"🤖 Навъи бот: <code>{data['type']}</code>\n"
-            f"📢 Канал: <code>{data['channel']}</code>\n"
-            f"🔗 URL: {data['url']}\n\n"
-            "⚙️ Қадами навбатӣ: сохтани конфигурация ва фаъол кардани боти шахсӣ.",
+            "<code>@mychannel</code>",
             parse_mode="HTML"
         )
 
         return
 
+    # ======================================
+    # CHANNEL
+    # ======================================
+
+    if step == "channel":
+
+        if not text.startswith("@"):
+
+            await message.answer(
+                "❌ Формати канал нодуруст аст.\n\n"
+                "Мисол:\n"
+                "<code>@mychannel</code>",
+                parse_mode="HTML"
+            )
+
+            return
+
+        data["channel"] = text
+        data["step"] = "url"
+
+        await message.answer(
+            "✅ Канал қабул шуд.\n\n"
+            "🔗 Акнун URL-и каналро фиристед.\n\n"
+            "Мисол:\n"
+            "<code>https://t.me/mychannel</code>",
+            parse_mode="HTML"
+        )
+
+        return
+
+    # ======================================
+    # URL
+    # ======================================
+
+    if step == "url":
+
+        if not (
+            text.startswith("https://t.me/")
+            or text.startswith("http://t.me/")
+        ):
+
+            await message.answer(
+                "❌ URL нодуруст аст.\n\n"
+                "Мисол:\n"
+                "<code>https://t.me/mychannel</code>",
+                parse_mode="HTML"
+            )
+
+            return
+
+        data["url"] = text
+        data["step"] = "ready"
+
+        # Сабт дар база
+        save_user(
+            user_id=user_id,
+            bot_type=data["type"],
+            bot_token=data["token"],
+            bot_username=data["bot_username"],
+            channel=data["channel"],
+            channel_url=data["url"],
+            status="ready"
+        )
+
+        keyboard = InlineKeyboardBuilder()
+
+        keyboard.button(
+            text="🚀 Ба кор даровардани бот",
+            callback_data="launch_bot"
+        )
+
+        keyboard.button(
+            text="🔄 Аз нав оғоз кардан",
+            callback_data="restart_setup"
+        )
+
+        keyboard.adjust(1)
+
+        await message.answer(
+            "🎉 <b>Тамом!</b>\n\n"
+            f"🤖 Бот: @{data['bot_username']}\n"
+            f"📢 Канал: {data['channel']}\n"
+            f"🔗 URL: {data['url']}\n\n"
+            "Ҳамаи маълумот қабул шуд.\n"
+            "Акнун метавонед ботро ба кор дароред.",
+            reply_markup=keyboard.as_markup(),
+            parse_mode="HTML"
+        )
+
+        return
+
+    await message.answer(
+        "Барои оғоз /start-ро пахш кунед."
+    )
+
+
+# ==========================================
+# LAUNCH
+# ==========================================
+
+@dp.callback_query(F.data == "launch_bot")
+async def launch_bot(callback: CallbackQuery):
+
+    user_id = callback.from_user.id
+
+    if user_id not in users:
+
+        await callback.answer(
+            "Маълумот ёфт нашуд.",
+            show_alert=True
+        )
+
+        return
+
+    data = users[user_id]
+
+    if data.get("step") != "ready":
+
+        await callback.answer(
+            "Аввал ҳамаи маълумотро пур кунед.",
+            show_alert=True
+        )
+
+        return
+
+    await callback.message.answer(
+        "⚙️ <b>Бот омода мешавад...</b>\n\n"
+        "🔹 Санҷиши конфигурация...\n"
+        "🔹 Омода кардани функсияҳо...\n"
+        "🔹 Пайвастшавӣ ба Telegram...",
+        parse_mode="HTML"
+    )
+
+    # Ҳоло танҳо статусро active мекунем.
+    # Worker-и воқеии multi-bot дар қадами баъдӣ илова мешавад.
+
+    save_user(
+        user_id=user_id,
+        bot_type=data["type"],
+        bot_token=data["token"],
+        bot_username=data["bot_username"],
+        channel=data["channel"],
+        channel_url=data["url"],
+        status="active"
+    )
+
+    data["step"] = "active"
+
+    await callback.message.answer(
+        "🟢 <b>Боти шумо фаъол шуд!</b>\n\n"
+        f"🤖 @{data['bot_username']}\n"
+        f"📢 {data['channel']}\n\n"
+        "⚙️ Вазифа:\n"
+        f"<b>{data['type']}</b>",
+        parse_mode="HTML"
+    )
+
+    await callback.answer()
+
+
+# ==========================================
+# RESTART
+# ==========================================
+
+@dp.callback_query(F.data == "restart_setup")
+async def restart_setup(callback: CallbackQuery):
+
+    user_id = callback.from_user.id
+
+    users[user_id] = {
+        "step": "type",
+        "type": None,
+        "token": None,
+        "bot_username": None,
+        "channel": None,
+        "url": None
+    }
+
+    await callback.message.answer(
+        "🔄 Боз оғоз мекунем.\n\n"
+        "Боти шумо барои кадом кор сохта мешавад?",
+        reply_markup=main_menu()
+    )
+
+    await callback.answer()
+
+
+# ==========================================
+# MAIN
+# ==========================================
 
 async def main():
+
+    init_db()
 
     bot = Bot(BOT_TOKEN)
 
     try:
+
         await dp.start_polling(bot)
+
     finally:
+
         await bot.session.close()
 
 
