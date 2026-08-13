@@ -8,7 +8,7 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from database import init_db, save_user
-from bot_manager import check_bot_token
+from bot_manager import check_bot_token, run_user_bot
 
 logging.basicConfig(level=logging.INFO)
 
@@ -19,8 +19,11 @@ if not BOT_TOKEN:
 
 dp = Dispatcher()
 
-# Ҳолати муваққатии корбар
+# Маълумоти муваққатии корбарон
 users = {}
+
+# Ботҳои шахсии фаъол
+running_bots = {}
 
 
 # ==========================================
@@ -34,32 +37,26 @@ def main_menu():
         text="📁 Ҷустуҷӯи файлҳо",
         callback_data="files"
     )
-
     keyboard.button(
         text="🖼 Акс ва дизайн",
         callback_data="media"
     )
-
     keyboard.button(
         text="🛒 Савдо",
         callback_data="shop"
     )
-
     keyboard.button(
         text="🎬 Видео",
         callback_data="video"
     )
-
     keyboard.button(
         text="📚 Китоб / омӯзиш",
         callback_data="education"
     )
-
     keyboard.button(
         text="📢 Канал",
         callback_data="channel"
     )
-
     keyboard.button(
         text="⚙️ Боти дигар",
         callback_data="custom"
@@ -90,7 +87,7 @@ async def start(message: Message):
 
     await message.answer(
         "🤖 <b>BOT BUILDER</b>\n\n"
-        "Боти худро ба осонӣ созед.\n\n"
+        "Боти худро автоматӣ созед.\n\n"
         "Боти шумо барои кадом кор сохта мешавад?",
         reply_markup=main_menu(),
         parse_mode="HTML"
@@ -116,9 +113,6 @@ async def select_type(callback: CallbackQuery):
 
     user_id = callback.from_user.id
 
-    if user_id not in users:
-        users[user_id] = {}
-
     names = {
         "files": "📁 Ҷустуҷӯи файлҳо",
         "media": "🖼 Акс ва дизайн",
@@ -129,13 +123,16 @@ async def select_type(callback: CallbackQuery):
         "custom": "⚙️ Боти дигар"
     }
 
+    if user_id not in users:
+        users[user_id] = {}
+
     users[user_id]["type"] = callback.data
     users[user_id]["step"] = "token"
 
     await callback.message.answer(
         f"✅ <b>{names[callback.data]}</b>\n\n"
         "🔑 Токени боти худро фиристед.\n\n"
-        "Token аз @BotFather гирифта мешавад.",
+        "⚠️ Token-ро ба каси дигар нафиристед.",
         parse_mode="HTML"
     )
 
@@ -143,7 +140,7 @@ async def select_type(callback: CallbackQuery):
 
 
 # ==========================================
-# ҚАБУЛИ TOKEN / CHANNEL / URL
+# TOKEN / CHANNEL / URL
 # ==========================================
 
 @dp.message()
@@ -157,15 +154,14 @@ async def process_message(message: Message):
         )
         return
 
-    data = users[user_id]
-    step = data.get("step")
-
     if not message.text:
         await message.answer(
             "❌ Лутфан маълумотро ҳамчун матн фиристед."
         )
         return
 
+    data = users[user_id]
+    step = data.get("step")
     text = message.text.strip()
 
     # ======================================
@@ -181,20 +177,28 @@ async def process_message(message: Message):
         result = await check_bot_token(text)
 
         if not result:
-
             await message.answer(
                 "❌ <b>Token нодуруст аст.</b>\n\n"
-                "Token-ро аз @BotFather санҷед ва дубора фиристед.",
+                "Token-ро санҷед ва дубора фиристед.",
                 parse_mode="HTML"
             )
+            return
 
+        # Нагузорем, ки token-и боти асосӣ истифода шавад
+        if result["id"] == message.bot.id:
+
+            await result["bot"].session.close()
+
+            await message.answer(
+                "❌ Боти асосии BotBuilder-ро истифода бурда наметавонед.\n\n"
+                "Аз @BotFather боти дигар созед."
+            )
             return
 
         data["token"] = text
         data["bot_username"] = result["username"]
         data["step"] = "channel"
 
-        # connection-ро мепӯшем
         await result["bot"].session.close()
 
         await message.answer(
@@ -223,7 +227,6 @@ async def process_message(message: Message):
                 "<code>@mychannel</code>",
                 parse_mode="HTML"
             )
-
             return
 
         data["channel"] = text
@@ -231,7 +234,7 @@ async def process_message(message: Message):
 
         await message.answer(
             "✅ Канал қабул шуд.\n\n"
-            "🔗 Акнун URL-и каналро фиристед.\n\n"
+            "🔗 URL-и каналро фиристед.\n\n"
             "Мисол:\n"
             "<code>https://t.me/mychannel</code>",
             parse_mode="HTML"
@@ -256,13 +259,12 @@ async def process_message(message: Message):
                 "<code>https://t.me/mychannel</code>",
                 parse_mode="HTML"
             )
-
             return
 
         data["url"] = text
         data["step"] = "ready"
 
-        # Сабт дар база
+        # Сабти конфигурация
         save_user(
             user_id=user_id,
             bot_type=data["type"],
@@ -288,25 +290,20 @@ async def process_message(message: Message):
         keyboard.adjust(1)
 
         await message.answer(
-            "🎉 <b>Тамом!</b>\n\n"
+            "🎉 <b>Ҳамаи маълумот қабул шуд!</b>\n\n"
             f"🤖 Бот: @{data['bot_username']}\n"
             f"📢 Канал: {data['channel']}\n"
             f"🔗 URL: {data['url']}\n\n"
-            "Ҳамаи маълумот қабул шуд.\n"
-            "Акнун метавонед ботро ба кор дароред.",
+            "Барои оғоз кардани боти шахсӣ тугмаи поёнро пахш кунед.",
             reply_markup=keyboard.as_markup(),
             parse_mode="HTML"
         )
 
         return
 
-    await message.answer(
-        "Барои оғоз /start-ро пахш кунед."
-    )
-
 
 # ==========================================
-# LAUNCH
+# LAUNCH USER BOT
 # ==========================================
 
 @dp.callback_query(F.data == "launch_bot")
@@ -320,7 +317,6 @@ async def launch_bot(callback: CallbackQuery):
             "Маълумот ёфт нашуд.",
             show_alert=True
         )
-
         return
 
     data = users[user_id]
@@ -331,46 +327,80 @@ async def launch_bot(callback: CallbackQuery):
             "Аввал ҳамаи маълумотро пур кунед.",
             show_alert=True
         )
-
         return
 
-    await callback.message.answer(
-        "⚙️ <b>Бот омода мешавад...</b>\n\n"
-        "🔹 Санҷиши конфигурация...\n"
-        "🔹 Омода кардани функсияҳо...\n"
-        "🔹 Пайвастшавӣ ба Telegram...",
-        parse_mode="HTML"
-    )
+    # Агар аллакай фаъол бошад
+    if user_id in running_bots:
 
-    # Ҳоло танҳо статусро active мекунем.
-    # Worker-и воқеии multi-bot дар қадами баъдӣ илова мешавад.
+        task = running_bots[user_id]
 
-    save_user(
-        user_id=user_id,
-        bot_type=data["type"],
-        bot_token=data["token"],
-        bot_username=data["bot_username"],
-        channel=data["channel"],
-        channel_url=data["url"],
-        status="active"
-    )
+        if not task.done():
 
-    data["step"] = "active"
+            await callback.message.answer(
+                f"🟢 Боти @{data['bot_username']} аллакай фаъол аст."
+            )
+
+            await callback.answer()
+            return
 
     await callback.message.answer(
-        "🟢 <b>Боти шумо фаъол шуд!</b>\n\n"
+        "🚀 <b>Бот ба кор дароварда мешавад...</b>\n\n"
         f"🤖 @{data['bot_username']}\n"
-        f"📢 {data['channel']}\n\n"
-        "⚙️ Вазифа:\n"
-        f"<b>{data['type']}</b>",
+        "⚙️ Омода кардани функсияҳо...",
         parse_mode="HTML"
     )
+
+    try:
+
+        # Боти шахсӣ дар background оғоз мешавад
+        task = asyncio.create_task(
+            run_user_bot(
+                data["token"],
+                data["type"]
+            )
+        )
+
+        running_bots[user_id] = task
+
+        save_user(
+            user_id=user_id,
+            bot_type=data["type"],
+            bot_token=data["token"],
+            bot_username=data["bot_username"],
+            channel=data["channel"],
+            channel_url=data["url"],
+            status="active"
+        )
+
+        data["step"] = "active"
+
+        await asyncio.sleep(1)
+
+        await callback.message.answer(
+            "🟢 <b>Боти шумо фаъол шуд!</b>\n\n"
+            f"🤖 @{data['bot_username']}\n"
+            f"📢 {data['channel']}\n\n"
+            "Ҳоло метавонед ба боти худ дар Telegram дароед ва "
+            "/start фиристед.",
+            parse_mode="HTML"
+        )
+
+    except Exception as e:
+
+        logging.error(
+            "Launch error: %s",
+            e
+        )
+
+        await callback.message.answer(
+            "❌ Ҳангоми ба кор даровардани бот хато шуд."
+        )
 
     await callback.answer()
 
 
 # ==========================================
-# RESTART
+# RESTART SETUP
 # ==========================================
 
 @dp.callback_query(F.data == "restart_setup")
@@ -407,11 +437,9 @@ async def main():
     bot = Bot(BOT_TOKEN)
 
     try:
-
         await dp.start_polling(bot)
 
     finally:
-
         await bot.session.close()
 
 
