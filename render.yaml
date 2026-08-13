@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: telegram-bot-builder
+    runtime: python
+    plan: free
+
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn bot:app --host 0.0.0.0 --port $PORT
+
+    healthCheckPath: /health
+
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.5
+
+      - key: BOT_BUILDER_TOKEN
+        sync: false
+
+      - key: WEBHOOK_URL
+        sync: false
+
+      - key: ENCRYPTION_KEY
+        sync: false
+
+      - key: DATABASE_PATH
+        value: /tmp/bot_builder.db
